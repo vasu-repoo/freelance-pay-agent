@@ -5,18 +5,20 @@ import time
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 
-from ai_parser import parse_request
+from ai_parser import draft_reminder, parse_request
 from invoices import (
     create_draft_invoice,
     get_pay_link,
     get_status,
     invoice_id_from,
     send_invoice,
+    send_reminder,
 )
 
 load_dotenv()
 app = Flask(__name__, static_folder="static")
 STORE = "invoices.json"
+REMINDABLE = {"SENT", "UNPAID", "PARTIALLY_PAID"}
 
 
 def load_store():
@@ -84,6 +86,7 @@ def api_send():
         "amount": amount,
         "link": get_pay_link(inv),
         "created": time.strftime("%Y-%m-%d %H:%M"),
+        "reminders": 0,
     }
     items = load_store()
     items.insert(0, item)
@@ -97,6 +100,47 @@ def api_invoices():
     for it in items:
         it["status"] = get_status(it["id"])
     return jsonify(items)
+
+
+def find_invoice(inv_id):
+    return next((i for i in load_store() if i["id"] == inv_id), None)
+
+
+@app.post("/api/reminder/draft")
+def api_reminder_draft():
+    d = request.get_json(silent=True) or {}
+    item = find_invoice(str(d.get("id", "")))
+    if not item:
+        return jsonify(error="Invoice not found."), 404
+    tone = d.get("tone") if d.get("tone") in ("friendly", "firm") else "friendly"
+    status = get_status(item["id"])
+    if status not in REMINDABLE:
+        return jsonify(error=f"No reminder needed. This invoice is {status}."), 409
+    try:
+        subject, note = draft_reminder(item["client"], item["description"], item["amount"], tone)
+    except Exception:
+        return jsonify(error="The AI could not draft a reminder. Please try again."), 502
+    return jsonify(id=item["id"], client=item["client"], subject=subject, note=note)
+
+
+@app.post("/api/reminder/send")
+def api_reminder_send():
+    d = request.get_json(silent=True) or {}
+    items = load_store()
+    item = next((i for i in items if i["id"] == str(d.get("id", ""))), None)
+    if not item:
+        return jsonify(error="Invoice not found."), 404
+    subject = str(d.get("subject", "")).strip()[:200]
+    note = str(d.get("note", "")).strip()[:2000]
+    if not subject or not note:
+        return jsonify(error="Subject and message cannot be empty."), 400
+    if get_status(item["id"]) not in REMINDABLE:
+        return jsonify(error="This invoice no longer needs a reminder."), 409
+    if not send_reminder(item["id"], subject, note):
+        return jsonify(error="PayPal could not send the reminder."), 502
+    item["reminders"] = item.get("reminders", 0) + 1
+    save_store(items)
+    return jsonify(ok=True, reminders=item["reminders"])
 
 
 if __name__ == "__main__":

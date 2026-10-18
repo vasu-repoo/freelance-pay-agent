@@ -8,24 +8,26 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
 <style>
   body { font-family: system-ui, sans-serif; background: #f5f7fb; margin: 0; color: #1a2233; }
-  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
   h1 { margin: 0 0 4px; } .sub { color: #5b6577; margin: 0 0 24px; }
   .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  input, button { font: inherit; }
+  input, button, select, textarea { font: inherit; }
   #prompt { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c8d0de; border-radius: 8px; }
   button { padding: 10px 18px; border: 0; border-radius: 8px; background: #0b3d91; color: #fff; cursor: pointer; margin-top: 12px; }
   button.secondary { background: #e4e9f2; color: #1a2233; margin-left: 8px; }
   button:disabled { opacity: .5; cursor: wait; }
-  .row { display: flex; gap: 12px; margin: 6px 0; } .row b { width: 100px; }
-  #d-email { flex: 1; padding: 6px; border: 1px solid #c8d0de; border-radius: 6px; }
-  #msg { margin-top: 12px; min-height: 1.2em; } .err { color: #b00020; } .ok { color: #0a7a33; }
-  #draft { display: none; }
+  .row { display: flex; gap: 12px; margin: 8px 0; align-items: flex-start; } .row b { width: 100px; flex-shrink: 0; }
+  .row input, .row textarea { flex: 1; padding: 6px; border: 1px solid #c8d0de; border-radius: 6px; }
+  #msg, #inv-msg { margin-top: 12px; min-height: 1.2em; } .err { color: #b00020; } .ok { color: #0a7a33; }
+  #draft, #reminder { display: none; }
+  .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .bar button { margin: 0; }
 </style>
 </head>
 <body>
 <main>
   <h1>PayDay Agent</h1>
-  <p class="sub">Describe an invoice in plain English. Review it, approve it, and PayPal sends it.</p>
+  <p class="sub">Describe an invoice in plain English. Review it, approve it, and PayPal sends it. Chase late payments with AI-drafted reminders.</p>
 
   <div class="card">
     <input id="prompt" placeholder="e.g. Invoice Aman 75 dollars for website design">
@@ -43,11 +45,26 @@
     <button class="secondary" id="cancel-btn">Cancel</button>
   </div>
 
+  <div class="card" id="reminder">
+    <h3 style="margin-top:0">Review reminder</h3>
+    <div class="row"><b>To</b><span id="r-client"></span></div>
+    <div class="row"><b>Subject</b><input id="r-subject" maxlength="200"></div>
+    <div class="row"><b>Message</b><textarea id="r-note" rows="5" maxlength="2000"></textarea></div>
+    <button id="r-send-btn">Approve and send reminder</button>
+    <button class="secondary" id="r-cancel-btn">Cancel</button>
+  </div>
+
   <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center">
+    <div class="bar">
       <h3 style="margin:0">Your invoices</h3>
-      <button class="secondary" id="refresh-btn" style="margin:0">Refresh status</button>
+      <div>
+        <label>Reminder tone
+          <select id="tone"><option value="friendly">Friendly</option><option value="firm">Firm</option></select>
+        </label>
+        <button class="secondary" id="refresh-btn">Refresh status</button>
+      </div>
     </div>
+    <div id="inv-msg"></div>
     <div id="grid" class="ag-theme-quartz" style="margin-top:12px"></div>
   </div>
 </main>
@@ -55,9 +72,11 @@
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+const REMINDABLE = ['SENT', 'UNPAID', 'PARTIALLY_PAID'];
 let draft = null;
+let reminder = null;
 
-function say(text, cls) { const m = $('msg'); m.textContent = text; m.className = cls || ''; }
+function say(id, text, cls) { const m = $(id); m.textContent = text; m.className = cls || ''; }
 
 async function post(url, body) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -73,11 +92,20 @@ const gridApi = agGrid.createGrid($('grid'), {
     { field: 'description', headerName: 'Item', flex: 2 },
     { field: 'amount', headerName: 'Amount (USD)', valueFormatter: p => '$' + Number(p.value).toFixed(2) },
     { field: 'status', headerName: 'Status' },
-    { field: 'link', headerName: 'Payment link', cellRenderer: p => {
+    { headerName: 'Reminders', valueGetter: p => p.data.reminders || 0 },
+    { field: 'link', headerName: 'Payment link', sortable: false, filter: false, cellRenderer: p => {
         if (!p.value || !p.value.startsWith('https://www.sandbox.paypal.com/')) return '';
         const a = document.createElement('a');
         a.href = p.value; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open';
         return a;
+    } },
+    { headerName: 'Action', sortable: false, filter: false, cellRenderer: p => {
+        if (!p.data || !REMINDABLE.includes(p.data.status)) return '';
+        const b = document.createElement('button');
+        b.textContent = 'Draft reminder';
+        b.style.margin = '0'; b.style.padding = '4px 10px';
+        b.onclick = () => startReminder(p.data.id);
+        return b;
     } },
   ],
   defaultColDef: { flex: 1, sortable: true, filter: true },
@@ -91,7 +119,7 @@ async function loadInvoices() {
 }
 
 $('parse-btn').onclick = async () => {
-  const btn = $('parse-btn'); btn.disabled = true; say('Reading your request...');
+  const btn = $('parse-btn'); btn.disabled = true; say('msg', 'Reading your request...');
   try {
     draft = await post('/api/parse', { text: $('prompt').value });
     $('d-client').textContent = draft.client;
@@ -99,22 +127,47 @@ $('parse-btn').onclick = async () => {
     $('d-desc').textContent = draft.description;
     $('d-amount').textContent = '$' + draft.amount.toFixed(2);
     $('draft').style.display = 'block';
-    say('Check the details, then approve.', 'ok');
-  } catch (e) { say(e.message, 'err'); }
+    say('msg', 'Check the details, then approve.', 'ok');
+  } catch (e) { say('msg', e.message, 'err'); }
   btn.disabled = false;
 };
 
 $('send-btn').onclick = async () => {
-  const btn = $('send-btn'); btn.disabled = true; say('Sending via PayPal...');
+  const btn = $('send-btn'); btn.disabled = true; say('msg', 'Sending via PayPal...');
   try {
     await post('/api/send', { client: draft.client, email: $('d-email').value, description: draft.description, amount: draft.amount });
     $('draft').style.display = 'none'; $('prompt').value = '';
-    say('Invoice sent!', 'ok'); loadInvoices();
-  } catch (e) { say(e.message, 'err'); }
+    say('msg', 'Invoice sent!', 'ok'); loadInvoices();
+  } catch (e) { say('msg', e.message, 'err'); }
   btn.disabled = false;
 };
 
-$('cancel-btn').onclick = () => { $('draft').style.display = 'none'; say('Cancelled. Nothing was sent.'); };
+$('cancel-btn').onclick = () => { $('draft').style.display = 'none'; say('msg', 'Cancelled. Nothing was sent.'); };
+
+async function startReminder(id) {
+  say('inv-msg', 'Drafting a reminder...');
+  try {
+    reminder = await post('/api/reminder/draft', { id, tone: $('tone').value });
+    $('r-client').textContent = reminder.client;
+    $('r-subject').value = reminder.subject;
+    $('r-note').value = reminder.note;
+    $('reminder').style.display = 'block';
+    $('reminder').scrollIntoView({ behavior: 'smooth' });
+    say('inv-msg', 'Review the reminder, then approve.', 'ok');
+  } catch (e) { say('inv-msg', e.message, 'err'); }
+}
+
+$('r-send-btn').onclick = async () => {
+  const btn = $('r-send-btn'); btn.disabled = true; say('inv-msg', 'Sending reminder via PayPal...');
+  try {
+    await post('/api/reminder/send', { id: reminder.id, subject: $('r-subject').value, note: $('r-note').value });
+    $('reminder').style.display = 'none';
+    say('inv-msg', 'Reminder sent!', 'ok'); loadInvoices();
+  } catch (e) { say('inv-msg', e.message, 'err'); }
+  btn.disabled = false;
+};
+
+$('r-cancel-btn').onclick = () => { $('reminder').style.display = 'none'; say('inv-msg', 'Cancelled. No reminder was sent.'); };
 $('refresh-btn').onclick = loadInvoices;
 loadInvoices();
 </script>

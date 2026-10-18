@@ -87,6 +87,16 @@ def get_pay_link(invoice_id):
         return None
     return data.get("detail", {}).get("metadata", {}).get("recipient_view_url")
 
+def send_reminder(invoice_id, subject, note):
+    token = get_token()
+    r = requests.post(
+        f"{BASE}/v2/invoicing/invoices/{invoice_id}/remind",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"subject": subject, "note": note, "send_to_invoicer": False},
+        timeout=30,
+    )
+    print("Reminder:", r.status_code, r.text)
+    return r.ok
 
 if __name__ == "__main__":
     # Check an existing invoice:  python invoices.py status INV2-XXXX
