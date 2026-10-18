@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 from dotenv import load_dotenv
 
@@ -65,22 +66,42 @@ def send_invoice(invoice_id):
     return r.ok
 
 
-def get_status(invoice_id):
+def get_invoice(invoice_id):
     token = get_token()
     r = requests.get(
         f"{BASE}/v2/invoicing/invoices/{invoice_id}",
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
     )
-    return r.json().get("status") if r.ok else r.text
+    return r.json() if r.ok else None
+
+
+def get_status(invoice_id):
+    data = get_invoice(invoice_id)
+    return data.get("status") if data else "Could not fetch invoice"
+
+
+def get_pay_link(invoice_id):
+    data = get_invoice(invoice_id)
+    if not data:
+        return None
+    return data.get("detail", {}).get("metadata", {}).get("recipient_view_url")
 
 
 if __name__ == "__main__":
+    # Check an existing invoice:  python invoices.py status INV2-XXXX
+    if len(sys.argv) == 3 and sys.argv[1] == "status":
+        print("Status:", get_status(sys.argv[2]))
+        sys.exit()
+
+    # Otherwise create and send a new test invoice
     result = create_draft_invoice(
-        "Rahul", "sb-d47p2i53429636@personal.example.com", "Logo design", 50
+        "Rahul", "sb-pxyja53423498@personal.example.com", "Logo design", 50
     )
     if result:
         inv = invoice_id_from(result)
-        print("Draft:", inv, get_status(inv))
+        print("Invoice ID:", inv)
+        print("Draft status:", get_status(inv))
         send_invoice(inv)
         print("After send:", get_status(inv))
+        print("Pay here:", get_pay_link(inv))
