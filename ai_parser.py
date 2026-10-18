@@ -31,7 +31,7 @@ def parse_request(text):
     )
     if not r.ok:
         print("Error:", r.status_code, r.text)
-        raise SystemExit(1)
+        raise RuntimeError(f"AI error {r.status_code}")
     content = r.json()["choices"][0]["message"]["content"].strip()
     content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(content)
