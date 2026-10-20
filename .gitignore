@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 invoices.json
+invoices.json
+invoices.json.bak
+.pytest_cache/

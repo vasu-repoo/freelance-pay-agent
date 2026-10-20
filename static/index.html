@@ -16,12 +16,21 @@
   button { padding: 10px 18px; border: 0; border-radius: 8px; background: #0b3d91; color: #fff; cursor: pointer; margin-top: 12px; }
   button.secondary { background: #e4e9f2; color: #1a2233; margin-left: 8px; }
   button:disabled { opacity: .5; cursor: wait; }
+  :focus-visible { outline: 3px solid #7aa7ff; outline-offset: 2px; }
   .row { display: flex; gap: 12px; margin: 8px 0; align-items: flex-start; } .row b { width: 100px; flex-shrink: 0; }
-  .row input, .row textarea { flex: 1; padding: 6px; border: 1px solid #c8d0de; border-radius: 6px; }
+  .row input, .row textarea { flex: 1; padding: 6px; border: 1px solid #c8d0de; border-radius: 6px; min-width: 0; }
   #msg, #inv-msg { margin-top: 12px; min-height: 1.2em; } .err { color: #b00020; } .ok { color: #0a7a33; }
-  #draft, #reminder { display: none; }
+  #draft, #reminder, #empty, #fallback { display: none; }
+  #empty { color: #5b6577; margin: 16px 0 4px; }
   .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .bar button { margin: 0; }
+  .bar button { margin: 0; } .muted { color: #5b6577; font-size: .85rem; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .8rem; font-weight: 600; }
+  .pill.paid { background: #dff5e6; color: #0a6b2d; } .pill.pending { background: #e1ecff; color: #0b3d91; }
+  .pill.unknown { background: #eceff4; color: #4a5568; } .pill.other { background: #fff1d6; color: #8a5a00; }
+  table.plain { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  table.plain th, table.plain td { text-align: left; padding: 8px; border-bottom: 1px solid #e4e9f2; }
+  @media (max-width: 600px) { .row { flex-direction: column; gap: 4px; } .row b { width: auto; } }
 </style>
 </head>
 <body>
@@ -30,15 +39,16 @@
   <p class="sub">Describe an invoice in plain English. Review it, approve it, and PayPal sends it. Chase late payments with AI-drafted reminders.</p>
 
   <div class="card">
-    <input id="prompt" placeholder="e.g. Invoice Aman 75 dollars for website design">
+    <label class="sr" for="prompt">Describe the invoice</label>
+    <input id="prompt" maxlength="500" placeholder="e.g. Invoice Aman 75 dollars for website design">
     <button id="parse-btn">Draft invoice</button>
-    <div id="msg"></div>
+    <div id="msg" role="status" aria-live="polite"></div>
   </div>
 
   <div class="card" id="draft">
     <h3 style="margin-top:0">Review before sending</h3>
     <div class="row"><b>Client</b><span id="d-client"></span></div>
-    <div class="row"><b>Email</b><input id="d-email" type="email"></div>
+    <div class="row"><b><label for="d-email">Email</label></b><input id="d-email" type="email" maxlength="254"></div>
     <div class="row"><b>Item</b><span id="d-desc"></span></div>
     <div class="row"><b>Amount</b><span id="d-amount"></span></div>
     <button id="send-btn">Approve and send</button>
@@ -48,8 +58,8 @@
   <div class="card" id="reminder">
     <h3 style="margin-top:0">Review reminder</h3>
     <div class="row"><b>To</b><span id="r-client"></span></div>
-    <div class="row"><b>Subject</b><input id="r-subject" maxlength="200"></div>
-    <div class="row"><b>Message</b><textarea id="r-note" rows="5" maxlength="2000"></textarea></div>
+    <div class="row"><b><label for="r-subject">Subject</label></b><input id="r-subject" maxlength="200"></div>
+    <div class="row"><b><label for="r-note">Message</label></b><textarea id="r-note" rows="5" maxlength="2000"></textarea></div>
     <button id="r-send-btn">Approve and send reminder</button>
     <button class="secondary" id="r-cancel-btn">Cancel</button>
   </div>
@@ -64,8 +74,11 @@
         <button class="secondary" id="refresh-btn">Refresh status</button>
       </div>
     </div>
-    <div id="inv-msg"></div>
+    <div class="muted" id="updated"></div>
+    <div id="inv-msg" role="status" aria-live="polite"></div>
+    <p id="empty">No invoices yet. Describe one above to get started.</p>
     <div id="grid" class="ag-theme-quartz" style="margin-top:12px"></div>
+    <div id="fallback"></div>
   </div>
 </main>
 
@@ -73,81 +86,158 @@
 <script>
 const $ = id => document.getElementById(id);
 const REMINDABLE = ['SENT', 'UNPAID', 'PARTIALLY_PAID'];
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/;
 let draft = null;
 let reminder = null;
+let drafting = false;
 
 function say(id, text, cls) { const m = $(id); m.textContent = text; m.className = cls || ''; }
 
-async function post(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || 'Something went wrong.');
+// One place for all network calls, so every failure becomes a readable message.
+async function api(url, body) {
+  let r;
+  try {
+    r = await fetch(url, body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw new Error('Cannot reach the app server. Is "python app.py" still running?');
+  }
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* not JSON */ }
+  if (!r.ok) throw new Error((data && data.error) || 'Something went wrong (' + r.status + ').');
   return data;
 }
 
-const gridApi = agGrid.createGrid($('grid'), {
-  columnDefs: [
-    { field: 'created', headerName: 'Created' },
-    { field: 'client', headerName: 'Client' },
-    { field: 'description', headerName: 'Item', flex: 2 },
-    { field: 'amount', headerName: 'Amount (USD)', valueFormatter: p => '$' + Number(p.value).toFixed(2) },
-    { field: 'status', headerName: 'Status' },
-    { headerName: 'Reminders', valueGetter: p => p.data.reminders || 0 },
-    { field: 'link', headerName: 'Payment link', sortable: false, filter: false, cellRenderer: p => {
-        if (!p.value || !p.value.startsWith('https://www.sandbox.paypal.com/')) return '';
-        const a = document.createElement('a');
-        a.href = p.value; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open';
-        return a;
-    } },
-    { headerName: 'Action', sortable: false, filter: false, cellRenderer: p => {
-        if (!p.data || !REMINDABLE.includes(p.data.status)) return '';
-        const b = document.createElement('button');
-        b.textContent = 'Draft reminder';
-        b.style.margin = '0'; b.style.padding = '4px 10px';
-        b.onclick = () => startReminder(p.data.id);
-        return b;
-    } },
-  ],
-  defaultColDef: { flex: 1, sortable: true, filter: true },
-  domLayout: 'autoHeight',
-  rowData: [],
-});
-
-async function loadInvoices() {
-  const r = await fetch('/api/invoices');
-  gridApi.setGridOption('rowData', await r.json());
+function statusPill(status) {
+  const s = String(status || 'UNKNOWN');
+  const el = document.createElement('span');
+  el.className = 'pill ' + (['PAID', 'MARKED_AS_PAID'].includes(s) ? 'paid'
+    : REMINDABLE.includes(s) || s === 'PAYMENT_PENDING' ? 'pending'
+    : s === 'UNKNOWN' ? 'unknown' : 'other');
+  el.textContent = s.replace(/_/g, ' ');
+  return el;
 }
 
-$('parse-btn').onclick = async () => {
+function payLink(url) {
+  if (!url || !String(url).startsWith('https://www.sandbox.paypal.com/')) return document.createTextNode('');
+  const a = document.createElement('a');
+  a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open';
+  return a;
+}
+
+function reminderButton(row) {
+  if (!row || !REMINDABLE.includes(row.status)) return document.createTextNode('');
+  const b = document.createElement('button');
+  b.textContent = 'Draft reminder';
+  b.style.margin = '0'; b.style.padding = '4px 10px';
+  b.onclick = () => startReminder(row.id);
+  return b;
+}
+
+let gridApi = null;
+if (typeof agGrid !== 'undefined') {
+  gridApi = agGrid.createGrid($('grid'), {
+    columnDefs: [
+      { field: 'created', headerName: 'Created' },
+      { field: 'client', headerName: 'Client' },
+      { field: 'description', headerName: 'Item', flex: 2 },
+      { field: 'amount', headerName: 'Amount (USD)', valueFormatter: p => '$' + Number(p.value).toFixed(2) },
+      { field: 'status', headerName: 'Status', cellRenderer: p => statusPill(p.value) },
+      { headerName: 'Reminders', valueGetter: p => (p.data && p.data.reminders) || 0 },
+      { field: 'link', headerName: 'Payment link', sortable: false, filter: false, cellRenderer: p => payLink(p.value) },
+      { headerName: 'Action', sortable: false, filter: false, cellRenderer: p => reminderButton(p.data) },
+    ],
+    defaultColDef: { flex: 1, sortable: true, filter: true, minWidth: 110 },
+    domLayout: 'autoHeight',
+    rowData: [],
+  });
+}
+
+// Plain table used only if the table library cannot load (for example, no internet).
+function renderFallback(rows) {
+  const box = $('fallback');
+  box.replaceChildren();
+  const table = document.createElement('table');
+  table.className = 'plain';
+  const head = table.insertRow();
+  ['Created', 'Client', 'Item', 'Amount (USD)', 'Status', 'Reminders', 'Payment link', 'Action']
+    .forEach(h => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
+  rows.forEach(r => {
+    const tr = table.insertRow();
+    [r.created, r.client, r.description, '$' + Number(r.amount).toFixed(2)].forEach(v => { tr.insertCell().textContent = v; });
+    tr.insertCell().appendChild(statusPill(r.status));
+    tr.insertCell().textContent = r.reminders || 0;
+    tr.insertCell().appendChild(payLink(r.link));
+    tr.insertCell().appendChild(reminderButton(r));
+  });
+  box.appendChild(table);
+}
+
+function showRows(rows) {
+  const has = rows.length > 0;
+  $('empty').style.display = has ? 'none' : 'block';
+  if (gridApi) {
+    $('grid').style.display = has ? 'block' : 'none';
+    gridApi.setGridOption('rowData', rows);
+  } else {
+    $('fallback').style.display = has ? 'block' : 'none';
+    if (has) renderFallback(rows);
+  }
+}
+
+async function loadInvoices() {
+  const btn = $('refresh-btn');
+  btn.disabled = true; btn.textContent = 'Refreshing...';
+  try {
+    showRows(await api('/api/invoices'));
+    $('updated').textContent = 'Last updated ' + new Date().toLocaleTimeString();
+  } catch (e) { say('inv-msg', e.message, 'err'); }
+  btn.disabled = false; btn.textContent = 'Refresh status';
+}
+
+async function draftInvoice() {
+  const text = $('prompt').value.trim();
+  if (!text) { say('msg', 'Please type what you want to invoice.', 'err'); return; }
   const btn = $('parse-btn'); btn.disabled = true; say('msg', 'Reading your request...');
   try {
-    draft = await post('/api/parse', { text: $('prompt').value });
+    draft = await api('/api/parse', { text });
     $('d-client').textContent = draft.client;
     $('d-email').value = draft.email;
     $('d-desc').textContent = draft.description;
     $('d-amount').textContent = '$' + draft.amount.toFixed(2);
     $('draft').style.display = 'block';
     say('msg', 'Check the details, then approve.', 'ok');
-  } catch (e) { say('msg', e.message, 'err'); }
+  } catch (e) {
+    $('draft').style.display = 'none'; draft = null;
+    say('msg', e.message, 'err');
+  }
   btn.disabled = false;
-};
+}
+
+$('parse-btn').onclick = draftInvoice;
+$('prompt').addEventListener('keydown', e => { if (e.key === 'Enter') draftInvoice(); });
 
 $('send-btn').onclick = async () => {
+  if (!draft) return;
+  const email = $('d-email').value.trim();
+  if (!EMAIL_RE.test(email)) { say('msg', 'Please enter a valid customer email.', 'err'); return; }
   const btn = $('send-btn'); btn.disabled = true; say('msg', 'Sending via PayPal...');
   try {
-    await post('/api/send', { client: draft.client, email: $('d-email').value, description: draft.description, amount: draft.amount });
-    $('draft').style.display = 'none'; $('prompt').value = '';
+    await api('/api/send', { client: draft.client, email, description: draft.description, amount: draft.amount });
+    $('draft').style.display = 'none'; $('prompt').value = ''; draft = null;
     say('msg', 'Invoice sent!', 'ok'); loadInvoices();
   } catch (e) { say('msg', e.message, 'err'); }
   btn.disabled = false;
 };
 
-$('cancel-btn').onclick = () => { $('draft').style.display = 'none'; say('msg', 'Cancelled. Nothing was sent.'); };
+$('cancel-btn').onclick = () => { $('draft').style.display = 'none'; draft = null; say('msg', 'Cancelled. Nothing was sent.'); };
 
 async function startReminder(id) {
-  say('inv-msg', 'Drafting a reminder...');
+  if (drafting) return;
+  drafting = true; say('inv-msg', 'Drafting a reminder...');
   try {
-    reminder = await post('/api/reminder/draft', { id, tone: $('tone').value });
+    reminder = await api('/api/reminder/draft', { id, tone: $('tone').value });
     $('r-client').textContent = reminder.client;
     $('r-subject').value = reminder.subject;
     $('r-note').value = reminder.note;
@@ -155,19 +245,21 @@ async function startReminder(id) {
     $('reminder').scrollIntoView({ behavior: 'smooth' });
     say('inv-msg', 'Review the reminder, then approve.', 'ok');
   } catch (e) { say('inv-msg', e.message, 'err'); }
+  drafting = false;
 }
 
 $('r-send-btn').onclick = async () => {
+  if (!reminder) return;
   const btn = $('r-send-btn'); btn.disabled = true; say('inv-msg', 'Sending reminder via PayPal...');
   try {
-    await post('/api/reminder/send', { id: reminder.id, subject: $('r-subject').value, note: $('r-note').value });
-    $('reminder').style.display = 'none';
+    await api('/api/reminder/send', { id: reminder.id, subject: $('r-subject').value, note: $('r-note').value });
+    $('reminder').style.display = 'none'; reminder = null;
     say('inv-msg', 'Reminder sent!', 'ok'); loadInvoices();
   } catch (e) { say('inv-msg', e.message, 'err'); }
   btn.disabled = false;
 };
 
-$('r-cancel-btn').onclick = () => { $('reminder').style.display = 'none'; say('inv-msg', 'Cancelled. No reminder was sent.'); };
+$('r-cancel-btn').onclick = () => { $('reminder').style.display = 'none'; reminder = null; say('inv-msg', 'Cancelled. No reminder was sent.'); };
 $('refresh-btn').onclick = loadInvoices;
 loadInvoices();
 </script>
