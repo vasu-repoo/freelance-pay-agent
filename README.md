@@ -74,6 +74,7 @@ You need Python 3.10 or newer, a free PayPal sandbox app, and a free Google AI S
    ```
    python app.py
    ```
+   The red "development server" warning in the terminal is normal for this local demo. It is not an error.
 
 ### PayPal sandbox notes
 
