@@ -32,6 +32,7 @@ I built PayDay Agent because I have seen friends hesitate to ask clients for mon
 | Backend | Python, Flask |
 | Frontend | HTML and JavaScript, AG Grid for the invoice table |
 | Tests | pytest (77 tests, using fake PayPal and AI, so no real accounts are needed) |
+| AI coding assistant | Claude (Anthropic) helped in writing and testing the code. The idea, setup, testing and decisions are mine. |
 
 ## Built to be reliable and safe
 
